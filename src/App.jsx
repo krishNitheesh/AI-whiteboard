@@ -28,6 +28,9 @@ export default function App() {
   const isDrawingRef = useRef(false);
   const lastPointRef = useRef(null);
   const lastGestureRef = useRef('NONE');
+  const lastPenActionRef = useRef('NONE');
+  const controlGestureHistoryRef = useRef([]);
+  const penActionHistoryRef = useRef([]);
   const clearGestureStartRef = useRef(null);
   const colorIndexRef = useRef(0);
   const cursorRef = useRef(null);
@@ -137,37 +140,51 @@ export default function App() {
           return Math.sqrt((p1.x - p2.x)**2 + (p1.y - p2.y)**2 + (p1.z - p2.z)**2);
         };
 
-        const getGesture = (landmarks) => {
-          if (!landmarks) return 'NONE';
-          const wrist = landmarks[0];
+        const getFingerStates = (landmarks) => {
+          if (!landmarks) return null;
+          const isIndexUp = getDist(landmarks, 0, 8) > getDist(landmarks, 0, 6) * 1.15;
+          const isMiddleUp = getDist(landmarks, 0, 12) > getDist(landmarks, 0, 10) * 1.15;
+          const isRingUp = getDist(landmarks, 0, 16) > getDist(landmarks, 0, 14) * 1.15;
+          const isPinkyUp = getDist(landmarks, 0, 20) > getDist(landmarks, 0, 18) * 1.15;
           
-          const isIndexUp = getDist(landmarks, 0, 8) > getDist(landmarks, 0, 6);
-          const isMiddleUp = getDist(landmarks, 0, 12) > getDist(landmarks, 0, 10);
-          const isRingUp = getDist(landmarks, 0, 16) > getDist(landmarks, 0, 14);
-          const isPinkyUp = getDist(landmarks, 0, 20) > getDist(landmarks, 0, 18);
-          
-          const isThumbExtended = getDist(landmarks, 0, 4) > getDist(landmarks, 0, 3);
+          const isThumbExtended = getDist(landmarks, 0, 4) > getDist(landmarks, 0, 3) * 1.05;
           const thumbToPinkyBase = getDist(landmarks, 4, 17);
           const indexToPinkyBase = getDist(landmarks, 5, 17);
           const isThumbUp = isThumbExtended && (thumbToPinkyBase > indexToPinkyBase * 1.2);
           
-          const isOpenPalm = isIndexUp && isMiddleUp && isRingUp && isPinkyUp;
-          const isOneFinger = isIndexUp && !isMiddleUp && !isRingUp && !isPinkyUp;
-          const isThreeFingers = isIndexUp && isMiddleUp && isRingUp && !isPinkyUp;
-          const isThumbsUpGesture = isThumbUp && !isIndexUp && !isMiddleUp && !isRingUp && !isPinkyUp;
-          
-          if (isOneFinger) return 'DRAW';
-          if (isOpenPalm) return 'ERASE';
-          if (isTwoFingers) return 'COLOR';
-          if (isThumbsUpGesture) return 'CLEAR_ALL';
-          return 'NONE';
+          return { isThumbUp, isIndexUp, isMiddleUp, isRingUp, isPinkyUp };
         };
 
-        let currentGesture = 'NONE';
-        
+        let rawControlGesture = 'NONE';
         if (controlHand) {
-           currentGesture = getGesture(controlHand);
+          const l = getFingerStates(controlHand);
+          if (l.isThumbUp && !l.isIndexUp && !l.isMiddleUp && !l.isRingUp && !l.isPinkyUp) rawControlGesture = 'CLEAR_ALL';
+          else if (l.isIndexUp && l.isMiddleUp && l.isRingUp && l.isPinkyUp) rawControlGesture = 'ERASE';
+          else if (l.isIndexUp && l.isMiddleUp && !l.isRingUp && !l.isPinkyUp) rawControlGesture = 'STOP'; // 2 fingers
+          else if (l.isIndexUp && !l.isMiddleUp && !l.isRingUp && !l.isPinkyUp) rawControlGesture = 'DRAW'; // 1 finger
         }
+
+        let rawPenAction = 'NONE';
+        if (penHand) {
+          const r = getFingerStates(penHand);
+          // 4 fingers on right hand -> color (Index, Middle, Ring, Pinky)
+          if (!r.isThumbUp && r.isIndexUp && r.isMiddleUp && r.isRingUp && r.isPinkyUp) {
+            rawPenAction = 'COLOR';
+          }
+        }
+
+        // Debounce Gestures using history buffers
+        const getMostFrequent = (arr) => {
+          if (!arr.length) return 'NONE';
+          const counts = arr.reduce((acc, curr) => { acc[curr] = (acc[curr] || 0) + 1; return acc; }, {});
+          return Object.keys(counts).reduce((a, b) => counts[a] > counts[b] ? a : b);
+        };
+
+        controlGestureHistoryRef.current = [...controlGestureHistoryRef.current.slice(-6), rawControlGesture];
+        penActionHistoryRef.current = [...penActionHistoryRef.current.slice(-6), rawPenAction];
+
+        let currentGesture = getMostFrequent(controlGestureHistoryRef.current);
+        const currentPenAction = getMostFrequent(penActionHistoryRef.current);
 
         // Edge triggering and hold-to-clear logic
         if (currentGesture === 'CLEAR_ALL') {
@@ -180,27 +197,30 @@ export default function App() {
             setTimeout(() => setActiveGestureInfo(''), 2000);
             clearGestureStartRef.current = null;
             currentGesture = 'NONE';
+            controlGestureHistoryRef.current = []; // Reset history
           }
         } else {
           if (clearGestureStartRef.current) {
             clearGestureStartRef.current = null;
             setActiveGestureInfo('');
           }
-          
-          if (currentGesture !== lastGestureRef.current) {
-            if (currentGesture === 'COLOR') {
-              colorIndexRef.current = (colorIndexRef.current + 1) % COLORS.length;
-              const nextColor = COLORS[colorIndexRef.current].value;
-              setCurrentColor(nextColor);
-              setActiveGestureInfo('Color Changed: ' + COLORS[colorIndexRef.current].id);
-              setTimeout(() => setActiveGestureInfo(''), 2000);
-            }
+        }
+
+        // Right Hand Color Change trigger
+        if (currentPenAction !== lastPenActionRef.current) {
+          if (currentPenAction === 'COLOR') {
+            colorIndexRef.current = (colorIndexRef.current + 1) % COLORS.length;
+            const nextColor = COLORS[colorIndexRef.current].value;
+            setCurrentColor(nextColor);
+            setActiveGestureInfo('Color Changed: ' + COLORS[colorIndexRef.current].id);
+            setTimeout(() => setActiveGestureInfo(''), 2000);
           }
         }
         
         lastGestureRef.current = currentGesture;
+        lastPenActionRef.current = currentPenAction;
         
-        const isCurrentlyInteracting = currentGesture === 'DRAW' || currentGesture === 'ERASE';
+        const isCurrentlyInteracting = (currentGesture === 'DRAW' || currentGesture === 'ERASE') && currentPenAction !== 'COLOR';
         const forceEraser = currentGesture === 'ERASE';
         
         // Draw using the PEN hand's coordinates if it exists
@@ -276,8 +296,8 @@ export default function App() {
             }
             
             // Low-pass filter for massive stroke smoothing
-            const smoothX = lastPointRef.current.x * 0.6 + rawX * 0.4;
-            const smoothY = lastPointRef.current.y * 0.6 + rawY * 0.4;
+            const smoothX = lastPointRef.current.x * 0.85 + rawX * 0.15;
+            const smoothY = lastPointRef.current.y * 0.85 + rawY * 0.15;
             
             ctx.beginPath();
             ctx.moveTo(lastPointRef.current.x, lastPointRef.current.y);
@@ -464,9 +484,10 @@ export default function App() {
         <span>👉 **Right Hand:** Pen</span>
         <br />
         <span>☝️ <b>Draw:</b> Left hand 1 finger up</span>
+        <span>✌️ <b>Stop:</b> Left hand 2 fingers up</span>
         <span>🖐️ <b>Erase:</b> Left hand open palm</span>
-        <span>✌️ <b>Next Color:</b> Left hand 2 fingers up</span>
-        <span>👍 <b>Clear All:</b> Left hand Thumbs up (Hold)</span>
+        <span>🎨 <b>Color:</b> Right hand 4 fingers up</span>
+        <span>👍 <b>Clear:</b> Left hand Thumbs up (Hold)</span>
       </div>
 
       {activeGestureInfo && (
